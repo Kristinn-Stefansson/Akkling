@@ -169,6 +169,54 @@ let ``LifecycleEvent should be fired``() = testDefault <| fun tck ->
     expectMsg tck "b" |> ignore
     expectMsg tck "poststop" |> ignore
     expectNoMsg tck
+
+type CounterEvent =
+    { Delta : int }
+
+type CounterCommand =
+    | Inc
+    | Dec
+    | GetState
+
+type CounterMessage =
+    | Command of CounterCommand
+    | Event of CounterEvent
+    | LifecycleEvent of LifecycleEvent
+    static member getLifecycle (evt: LifecycleEvent) = 
+        LifecycleEvent evt
+
+[<Fact>]
+let ``LifecycleEvent can be wrapped be fired``() = testDefault <| fun tck ->
+    let aref = 
+        spawn tck "actor"
+        <| props (fun ctx ->
+            let rec loop state =
+                actor {
+                    let! msg = ctx.Receive () 
+                    match msg with
+                    | Command cmd ->
+                        match cmd with
+                        | GetState ->
+                            let sender = ctx.Sender()
+                            sender <! state
+                            return! loop state
+                        | Inc -> return! loop (state + 1)
+                        | Dec -> return! loop (state - 1)
+                    | Event evt -> 
+                        let newState = state + evt.Delta
+                        return! loop newState
+                    | LifecycleEvent evt -> 
+                        return! loop (state + 100)
+                }
+            loop 1)
+
+    let subscriber = tck.CreateTestProbe()
+    tck.Sys.EventStream.Subscribe(subscriber.Ref, typeof<Akka.Event.UnhandledMessage>) |> ignore
+    aref <! Command Inc
+    aref <! Command Inc
+    aref <! Command Dec
+    aref <! Command GetState
+    expectMsgWithin tck (TimeSpan.FromSeconds 60.) 102 |> ignore
     
 [<Fact>]
 let ``LifecycleEvent should be fired with become``() = testDefault <| fun tck ->

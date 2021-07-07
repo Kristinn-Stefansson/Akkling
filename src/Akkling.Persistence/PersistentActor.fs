@@ -14,6 +14,7 @@ open Akka.Persistence
 open Akkling
 open Akka.Event
 open Newtonsoft.Json.Linq
+open System.Reflection
 
 type PID = string
 
@@ -188,12 +189,20 @@ and FunPersistentActor<'Message>(actor : Eventsourced<'Message> -> Effect<'Messa
         match actor ctx with
         | :? Become<'Message> as effect -> effect.Effect
         | effect -> effect
-    
-    member __.Become (effect : Effect<'Message>) = behavior <- effect
+    let checkLifecycle = typeof<'Message>.GetMethods(BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Static) |> Array.filter(fun m -> m.Name = "getLifecycle" && m.ReturnType.IsAssignableFrom(typeof<'Message>))
+    let msgHasGetLifecycle = checkLifecycle |> Array.length = 1
+    let getLifecycle (evt: LifecycleEvent) = (checkLifecycle |> Array.find( fun _ -> true)).Invoke(null, [|evt|]) :?> 'Message
+    let checkPersistanceLifecycle = typeof<'Message>.GetMethods(BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Static) |> Array.filter(fun m -> m.Name = "getPersistanceLifecycle" && m.ReturnType.IsAssignableFrom(typeof<'Message>))
+    let msgHasGetPersistanceLifecycle = checkPersistanceLifecycle |> Array.length = 1
+    let getPersistanceLifecycle (evt: PersistentLifecycleEvent) = (checkPersistanceLifecycle |> Array.find( fun _ -> true)).Invoke(null, [|evt|]) :?> 'Message
 
+    member __.Become (effect : Effect<'Message>) = behavior <- effect
+    
     member __.Handle (msg: obj) =
         match msg with
         | Message msg -> behavior.OnApplied(ctx, msg)
+        | :? LifecycleEvent as evt when msg <> null && msgHasGetLifecycle -> behavior.OnApplied(ctx, (getLifecycle evt ))
+        | :? PersistentLifecycleEvent as evt when msg <> null && msgHasGetPersistanceLifecycle -> behavior.OnApplied(ctx, (getPersistanceLifecycle evt ))
         | :? UnhandledSuppression -> ()
         | msg -> base.Unhandled msg
 

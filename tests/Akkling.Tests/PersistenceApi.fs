@@ -14,6 +14,7 @@ open Akka.Actor
 open System
 open System.Threading
 open Xunit
+open System.Reflection
 
 type Request = 
     | Action of int64 * string
@@ -114,7 +115,7 @@ let ``Effects.andThen should be called after event was persisted``() = testDefau
             match msg with
             | "cmd" ->
                 return Persist "evt"
-                       |> Effects.andThen (fun _ -> q <! "andThen1" )
+                       |> Effects.andThen (fun _ -> q <! "andThen1" ) 
                        |> Effects.andThen (fun _ -> q <! "andThen2" )
             | "evt" ->
                 q <! "evt"
@@ -125,4 +126,59 @@ let ``Effects.andThen should be called after event was persisted``() = testDefau
     expectMsg tck "evt" |> ignore
     expectMsg tck "andThen1" |> ignore
     expectMsg tck "andThen2" |> ignore
-    
+ 
+type CounterEvent =
+    { Delta : int }
+ 
+type CounterCommand =
+    | Inc
+    | Dec
+    | GetState
+    | Fail
+ 
+type CounterMessage =
+    | Command of CounterCommand
+    | Event of CounterEvent
+    | LifecycleEvent of LifecycleEvent
+    | PersistentLifecycleEvent of PersistentLifecycleEvent
+    static member getLifecycle (evt: LifecycleEvent) = 
+        LifecycleEvent evt
+    static member getPersistanceLifecycle (evt: PersistentLifecycleEvent) = 
+        PersistentLifecycleEvent evt
+
+[<Fact>]
+let ``LifecycleEvent can be wrapped be fired``() = testDefault <| fun tck ->
+    let aref = 
+        spawn tck "actor"
+        <| propsPersist (fun ctx ->
+            let rec loop state =
+                actor {
+                    let! msg = ctx.Receive () 
+                    match msg with
+                    | Command cmd ->
+                        match cmd with
+                        | GetState ->
+                            let sender = ctx.Sender()
+                            sender <! state
+                            return! loop state
+                        | Inc -> return Persist (Event { Delta = 1 }) 
+                        | Dec -> return Persist (Event { Delta = -1 })
+                        | Fail -> failwith "ordered error"
+                    | Event evt -> 
+                        let newState = state + evt.Delta
+                        return! loop newState
+                    | LifecycleEvent evt -> 
+                        return! loop (state + 100)
+                    | PersistentLifecycleEvent evt -> 
+                        return! loop (state + 1000)
+                }
+            loop 1)
+ 
+    let subscriber = tck.CreateTestProbe()
+    tck.Sys.EventStream.Subscribe(subscriber.Ref, typeof<Akka.Event.UnhandledMessage>) |> ignore
+    aref <! Command Inc
+    aref <! Command Inc
+    aref <! Command Fail
+    aref <! Command Dec
+    aref <! Command GetState
+    expectMsgWithin tck (TimeSpan.FromSeconds 60.) 1202 |> ignore
